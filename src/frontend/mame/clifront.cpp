@@ -217,7 +217,10 @@ void cli_frontend::start_execution(mame_machine_manager *manager, const std::vec
 	try
 	{
 		m_options.parse_command_line(args, OPTION_PRIORITY_CMDLINE);
-		m_osd.set_verbose(m_options.verbose());
+	}
+	catch (options_warning_exception &ex)
+	{
+		osd_printf_error("%s", ex.message());
 	}
 	catch (options_exception &ex)
 	{
@@ -228,6 +231,7 @@ void cli_frontend::start_execution(mame_machine_manager *manager, const std::vec
 		// otherwise, error on the options
 		throw emu_fatalerror(EMU_ERR_INVALID_CONFIG, "%s", ex.message());
 	}
+	m_osd.set_verbose(m_options.verbose());
 
 	// determine the base name of the EXE
 	std::string_view exename = core_filename_extract_base(args[0], true);
@@ -296,7 +300,7 @@ int cli_frontend::execute(std::vector<std::string> &args)
 			// get the top 16 approximate matches
 			driver_enumerator drivlist(m_options);
 			int matches[16];
-			drivlist.find_approximate_matches(m_options.attempted_system_name(), ARRAY_LENGTH(matches), matches);
+			drivlist.find_approximate_matches(m_options.attempted_system_name(), std::size(matches), matches);
 
 			// work out how wide the titles need to be
 			int titlelen(0);
@@ -819,7 +823,7 @@ void cli_frontend::listmedia(const std::vector<std::string> &args)
 			std::string paren_shortname = string_format("(%s)", imagedev.brief_instance_name());
 
 			// output the line, up to the list of extensions
-			printf("%-16s %-16s %-10s ", first ? drivlist.driver().name : "", imagedev.instance_name().c_str(), paren_shortname.c_str());
+			printf("%-16s %-16s %-10s ", drivlist.driver().name, imagedev.instance_name().c_str(), paren_shortname.c_str());
 
 			// get the extensions and print them
 			std::string extensions(imagedev.file_extensions());
@@ -1086,9 +1090,9 @@ void cli_frontend::output_single_softlist(std::ostream &out, software_list_devic
 		util::stream_format(out, "\t\t<software name=\"%s\"", util::xml::normalize_string(swinfo.shortname().c_str()));
 		if (!swinfo.parentname().empty())
 			util::stream_format(out, " cloneof=\"%s\"", util::xml::normalize_string(swinfo.parentname().c_str()));
-		if (swinfo.supported() == SOFTWARE_SUPPORTED_PARTIAL)
+		if (swinfo.supported() == software_support::PARTIALLY_SUPPORTED)
 			out << " supported=\"partial\"";
-		if (swinfo.supported() == SOFTWARE_SUPPORTED_NO)
+		else if (swinfo.supported() == software_support::UNSUPPORTED)
 			out << " supported=\"no\"";
 		out << ">\n";
 		util::stream_format(out, "\t\t\t<description>%s</description>\n", util::xml::normalize_string(swinfo.longname().c_str()));
@@ -1438,7 +1442,7 @@ void cli_frontend::romident(const std::vector<std::string> &args)
 	// create our own copy of options for the purposes of ROM identification
 	// so we are not "polluted" with driver-specific slot/image options
 	emu_options options;
-	options.set_value(OPTION_MEDIAPATH, m_options.media_path(), OPTION_PRIORITY_DEFAULT);
+	options.set_value(OPTION_HASHPATH, m_options.hash_path(), OPTION_PRIORITY_DEFAULT);
 
 	media_identifier ident(options);
 

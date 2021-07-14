@@ -328,6 +328,7 @@
 #include "sound/rf5c400.h"
 #include "sound/dmadac.h"
 #include "emupal.h"
+#include "screen.h"
 #include "speaker.h"
 
 #define GFXFIFO_IN_VERBOSE          0
@@ -355,11 +356,12 @@ struct cobra_polydata
 	uint32_t tex_address;
 };
 
-class cobra_renderer : public poly_manager<float, cobra_polydata, 8, 10000>
+class cobra_renderer : public poly_manager<float, cobra_polydata, 8>
 {
 public:
 	cobra_renderer(screen_device &screen)
-		: poly_manager<float, cobra_polydata, 8, 10000>(screen)
+		: poly_manager<float, cobra_polydata, 8>(screen.machine())
+		, m_screen(screen)
 	{
 		m_texture_ram = std::make_unique<uint32_t[]>(0x100000);
 
@@ -386,6 +388,7 @@ public:
 		}
 	}
 
+	screen_device &screen() const { return m_screen; }
 	void render_texture_scan(int32_t scanline, const extent_t &extent, const cobra_polydata &extradata, int threadid);
 	void render_color_scan(int32_t scanline, const extent_t &extent, const cobra_polydata &extradata, int threadid);
 	void draw_point(const rectangle &visarea, vertex_t &v, uint32_t color);
@@ -403,6 +406,7 @@ public:
 	void display(bitmap_rgb32 *bitmap, const rectangle &cliprect);
 	inline rgb_t texture_fetch(uint32_t *texture, int u, int v, int width, int format);
 private:
+	screen_device &m_screen;
 	std::unique_ptr<bitmap_rgb32> m_framebuffer;
 	std::unique_ptr<bitmap_rgb32> m_backbuffer;
 	std::unique_ptr<bitmap_rgb32> m_overlay;
@@ -777,10 +781,10 @@ public:
 
 	std::unique_ptr<cobra_renderer> m_renderer;
 
-	cobra_fifo *m_gfxfifo_in;
-	cobra_fifo *m_gfxfifo_out;
-	cobra_fifo *m_m2sfifo;
-	cobra_fifo *m_s2mfifo;
+	std::unique_ptr<cobra_fifo> m_gfxfifo_in;
+	std::unique_ptr<cobra_fifo> m_gfxfifo_out;
+	std::unique_ptr<cobra_fifo> m_m2sfifo;
+	std::unique_ptr<cobra_fifo> m_s2mfifo;
 
 	void gfxfifo_in_event_callback(cobra_fifo::EventType event);
 	void gfxfifo_out_event_callback(cobra_fifo::EventType event);
@@ -1132,7 +1136,7 @@ uint32_t cobra_state::screen_update_cobra(screen_device &screen, bitmap_rgb32 &b
 {
 	if (m_has_psac)
 	{
-		m_k001604->draw_back_layer(bitmap, cliprect);
+		m_k001604->draw_back_layer(screen, bitmap, cliprect);
 		m_k001604->draw_front_layer(screen, bitmap, cliprect);
 	}
 
@@ -2124,7 +2128,7 @@ void cobra_renderer::gfx_exit()
 
 void cobra_renderer::gfx_reset()
 {
-	cobra_state *cobra = machine().driver_data<cobra_state>();
+	cobra_state *cobra = screen().machine().driver_data<cobra_state>();
 
 	cobra->m_gfx_re_status = RE_STATUS_IDLE;
 }
@@ -2226,7 +2230,7 @@ void cobra_renderer::gfx_write_reg(uint64_t data)
 
 void cobra_renderer::gfx_fifo_exec()
 {
-	cobra_state *cobra = machine().driver_data<cobra_state>();
+	cobra_state *cobra = screen().machine().driver_data<cobra_state>();
 
 	if (cobra->m_gfx_fifo_loopback != 0)
 		return;
@@ -2234,8 +2238,8 @@ void cobra_renderer::gfx_fifo_exec()
 	const rectangle& visarea = screen().visible_area();
 	vertex_t vert[32];
 
-	cobra_fifo *fifo_in = cobra->m_gfxfifo_in;
-	cobra_fifo *fifo_out = cobra->m_gfxfifo_out;
+	cobra_fifo *fifo_in = cobra->m_gfxfifo_in.get();
+	cobra_fifo *fifo_out = cobra->m_gfxfifo_out.get();
 
 	while (fifo_in->current_num() >= 2)
 	{
@@ -2533,7 +2537,7 @@ void cobra_renderer::gfx_fifo_exec()
 							render_delegate rd = render_delegate(&cobra_renderer::render_texture_scan, this);
 							for (int i=2; i < units; i++)
 							{
-								render_triangle(visarea, rd, 8, vert[i-2], vert[i-1], vert[i]);
+								render_triangle<8>(visarea, rd, vert[i-2], vert[i-1], vert[i]);
 							}
 						}
 						else
@@ -2541,7 +2545,7 @@ void cobra_renderer::gfx_fifo_exec()
 							render_delegate rd = render_delegate(&cobra_renderer::render_color_scan, this);
 							for (int i=2; i < units; i++)
 							{
-								render_triangle(visarea, rd, 5, vert[i-2], vert[i-1], vert[i]);
+								render_triangle<5>(visarea, rd, vert[i-2], vert[i-1], vert[i]);
 							}
 						}
 						break;
@@ -3080,7 +3084,7 @@ void cobra_state::gfx_cpu_dc_store(offs_t offset, uint32_t data)
 	if (addr == 0x10 || addr == 0x18 || addr == 0x1e)
 	{
 		uint64_t i = (uint64_t)(m_gfx_fifo_cache_addr) << 32;
-		cobra_fifo *fifo_in = m_gfxfifo_in;
+		cobra_fifo *fifo_in = m_gfxfifo_in.get();
 
 		uint32_t a = (offset / 8) & 0xff;
 
@@ -3314,10 +3318,6 @@ void cobra_state::cobra(machine_config &config)
 	M48T58(config, "m48t58", 0);
 
 	K001604(config, m_k001604, 0);     // on the LAN board in Racing Jam DX
-	m_k001604->set_layer_size(0);
-	m_k001604->set_roz_size(1);
-	m_k001604->set_txt_mem_offset(0);  // correct?
-	m_k001604->set_roz_mem_offset(0);  // correct?
 	m_k001604->set_palette(m_palette);
 
 	COBRA_JVS_HOST(config, m_jvs_host, 4000000);
@@ -3332,36 +3332,32 @@ void cobra_state::cobra(machine_config &config)
 
 void cobra_state::init_cobra()
 {
-	m_gfxfifo_in  = auto_alloc(machine(),
-								cobra_fifo(machine(),
+	m_gfxfifo_in  = std::make_unique<cobra_fifo>(machine(),
 								8192,
 								"GFXFIFO_IN",
 								GFXFIFO_IN_VERBOSE != 0,
-								cobra_fifo::event_delegate(&cobra_state::gfxfifo_in_event_callback, this))
+								cobra_fifo::event_delegate(&cobra_state::gfxfifo_in_event_callback, this)
 								);
 
-	m_gfxfifo_out = auto_alloc(machine(),
-								cobra_fifo(machine(),
+	m_gfxfifo_out = std::make_unique<cobra_fifo>(machine(),
 								8192,
 								"GFXFIFO_OUT",
 								GFXFIFO_OUT_VERBOSE != 0,
-								cobra_fifo::event_delegate(&cobra_state::gfxfifo_out_event_callback, this))
+								cobra_fifo::event_delegate(&cobra_state::gfxfifo_out_event_callback, this)
 								);
 
-	m_m2sfifo     = auto_alloc(machine(),
-								cobra_fifo(machine(),
+	m_m2sfifo     = std::make_unique<cobra_fifo>(machine(),
 								2048,
 								"M2SFIFO",
 								M2SFIFO_VERBOSE != 0,
-								cobra_fifo::event_delegate(&cobra_state::m2sfifo_event_callback, this))
+								cobra_fifo::event_delegate(&cobra_state::m2sfifo_event_callback, this)
 								);
 
-	m_s2mfifo     = auto_alloc(machine(),
-								cobra_fifo(machine(),
+	m_s2mfifo     = std::make_unique<cobra_fifo>(machine(),
 								2048,
 								"S2MFIFO",
 								S2MFIFO_VERBOSE != 0,
-								cobra_fifo::event_delegate(&cobra_state::s2mfifo_event_callback, this))
+								cobra_fifo::event_delegate(&cobra_state::s2mfifo_event_callback, this)
 								);
 
 	m_maincpu->ppc_set_dcstore_callback(write32sm_delegate(*this, FUNC(cobra_state::main_cpu_dc_store)));

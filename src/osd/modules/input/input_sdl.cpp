@@ -377,13 +377,33 @@ public:
 		: sdl_device(machine, name, id, DEVICE_CLASS_KEYBOARD, module),
 		keyboard({{0}})
 	{
+		#ifdef __APPLE__
+		m_capslock_hack = false;
+		machine.add_notifier(MACHINE_NOTIFY_FRAME, machine_notify_delegate(&sdl_keyboard_device::frame_callback, this));
+		#endif
 	}
+
+	#ifdef __APPLE__
+	unsigned m_capslock_hack;
+	void frame_callback()
+	{
+		if (m_capslock_hack)
+			if (--m_capslock_hack == 0)
+				keyboard.state[SDL_SCANCODE_CAPSLOCK] = 0x00;
+	}
+	#endif
 
 	void process_event(SDL_Event &sdlevent) override
 	{
 		switch (sdlevent.type)
 		{
 		case SDL_KEYDOWN:
+
+			#ifdef __APPLE__
+			if (sdlevent.key.keysym.scancode == SDL_SCANCODE_CAPSLOCK)
+				m_capslock_hack = 2;
+			#endif
+
 			keyboard.state[sdlevent.key.keysym.scancode] = 0x80;
 			if (sdlevent.key.keysym.sym < 0x20)
 				machine().ui_input().push_char_event(osd_common_t::s_window_list.front()->target(), sdlevent.key.keysym.sym);
@@ -403,6 +423,11 @@ public:
 			break;
 
 		case SDL_KEYUP:
+			#ifdef __APPLE__
+			if (sdlevent.key.keysym.scancode == SDL_SCANCODE_CAPSLOCK)
+				break;
+			#endif
+
 			keyboard.state[sdlevent.key.keysym.scancode] = 0x00;
 			break;
 
@@ -437,6 +462,9 @@ public:
 	void reset() override
 	{
 		memset(&keyboard.state, 0, sizeof(keyboard.state));
+		#ifdef __APPLE__
+		m_capslock_hack = 0;
+		#endif
 	}
 };
 
@@ -786,7 +814,7 @@ public:
 			static_cast<int>(SDL_TEXTINPUT)
 		};
 
-		sdl_event_manager::instance().subscribe(event_types, ARRAY_LENGTH(event_types), this);
+		sdl_event_manager::instance().subscribe(event_types, std::size(event_types), this);
 
 		sdl_keyboard_device *devinfo;
 
@@ -817,7 +845,7 @@ public:
 	}
 
 private:
-	static keyboard_trans_table* sdlinput_read_keymap(running_machine &machine)
+	keyboard_trans_table* sdlinput_read_keymap(running_machine &machine)
 	{
 		char *keymap_filename;
 		FILE *keymap_file;
@@ -847,7 +875,7 @@ private:
 			key_trans_entries[i] = default_table[i];
 
 		// Allocate the trans table to be associated with the machine so we don't have to free it
-		keyboard_trans_table *custom_table = auto_alloc(machine, keyboard_trans_table(std::move(key_trans_entries), default_table.size()));
+		m_custom_table = std::make_unique<keyboard_trans_table>(std::move(key_trans_entries), default_table.size());
 
 		while (!feof(keymap_file))
 		{
@@ -879,10 +907,9 @@ private:
 
 					if (sk >= 0 && index >= 0)
 					{
-						key_trans_entry &entry = (*custom_table)[index];
+						key_trans_entry &entry = (*m_custom_table)[index];
 						entry.sdl_scancode = sk;
-						entry.ui_name = auto_alloc_array(machine, char, strlen(kns) + 1);
-						strcpy(entry.ui_name, kns);
+						entry.ui_name = const_cast<char *>(m_ui_names.emplace_back(kns).c_str());
 						osd_printf_verbose("Keymap: Mapped <%s> to <%s> with ui-text <%s>\n", sks, mks, kns);
 					}
 					else
@@ -894,8 +921,11 @@ private:
 		fclose(keymap_file);
 		osd_printf_verbose("Keymap: Processed %d lines\n", line);
 
-		return custom_table;
+		return m_custom_table.get();
 	}
+
+	std::unique_ptr<keyboard_trans_table> m_custom_table;
+	std::list<std::string> m_ui_names;
 };
 
 //============================================================
@@ -921,7 +951,7 @@ public:
 			static_cast<int>(SDL_MOUSEWHEEL)
 		};
 
-		sdl_event_manager::instance().subscribe(event_types, ARRAY_LENGTH(event_types), this);
+		sdl_event_manager::instance().subscribe(event_types, std::size(event_types), this);
 
 		sdl_mouse_device *devinfo;
 		char defname[20];
@@ -1148,7 +1178,7 @@ public:
 			static_cast<int>(SDL_JOYBUTTONUP)
 		};
 
-		sdl_event_manager::instance().subscribe(event_types, ARRAY_LENGTH(event_types), this);
+		sdl_event_manager::instance().subscribe(event_types, std::size(event_types), this);
 
 		osd_printf_verbose("Joystick: End initialization\n");
 	}
@@ -1182,7 +1212,7 @@ private:
 			// only map place holders if there were mappings specified
 			if (devmap->initialized)
 			{
-				snprintf(tempname, ARRAY_LENGTH(tempname), "NC%d", index);
+				snprintf(tempname, std::size(tempname), "NC%d", index);
 				m_sixaxis_mode
 					? devicelist()->create_device<sdl_sixaxis_joystick_device>(machine, tempname, guid_str, *this)
 					: devicelist()->create_device<sdl_joystick_device>(machine, tempname, guid_str, *this);
